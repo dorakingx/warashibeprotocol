@@ -6,6 +6,7 @@ import {
   getEscrowPublicClient,
   tryTokenLabel,
 } from "@/lib/escrow";
+import { buildOgTradeImageUrl } from "@/lib/ogTradeLabels";
 
 /** Used for absolute Frame URLs (Warpcast embed). Set in production / tunnel. */
 const APP_URL = process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000";
@@ -87,13 +88,15 @@ export async function GET() {
     `You give: ${giveLabel}. You receive: ${receiveLabel}.`.slice(0, 280);
 
   const state = encodeOfferState(active.offerId);
+  /** Dynamic OG: makerToken = NFT you receive (maker lock); desiredToken = NFT you give. */
+  const ogImageUrl = buildOgTradeImageUrl(APP_URL, receiveLabel, giveLabel);
 
   const html = frameHtml({
     "og:title": title,
     "og:description": description,
-    "og:image": PLACEHOLDER_IMAGE,
+    "og:image": ogImageUrl,
     "fc:frame": "vNext",
-    "fc:frame:image": PLACEHOLDER_IMAGE,
+    "fc:frame:image": ogImageUrl,
     "fc:frame:state": state,
     "fc:frame:button:1": "Accept Swap",
     "fc:frame:button:1:action": "tx",
@@ -115,8 +118,7 @@ function htmlResponse(html: string) {
 
 /** After a successful tx, clients POST here (per button post_url) with transactionId. */
 export async function POST() {
-  const successImage =
-    "https://placehold.co/1200x630/16213e/e94560/png?text=Swap+Successful";
+  const successImage = `${APP_URL}/api/og?variant=success`;
 
   const html = frameHtml({
     "og:title": "Swap Successful!",

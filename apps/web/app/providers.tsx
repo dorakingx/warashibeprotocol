@@ -3,6 +3,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Toaster } from "sonner";
+import { coinbaseWallet } from "@/lib/coinbaseWalletConnector";
 import { WagmiProvider, createConfig, http, injected } from "wagmi";
 import { base, baseSepolia } from "wagmi/chains";
 
@@ -16,7 +17,13 @@ function makeQueryClient() {
 
 export const wagmiConfig = createConfig({
   chains: [baseSepolia, base],
-  connectors: [injected()],
+  connectors: [
+    injected(),
+    coinbaseWallet({
+      appName: "Warashibe Protocol",
+      preference: { options: "smartWalletOnly" },
+    }),
+  ],
   transports: {
     [baseSepolia.id]: http(),
     [base.id]: http(),

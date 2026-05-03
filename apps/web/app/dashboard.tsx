@@ -65,6 +65,7 @@ export function Dashboard() {
   const [delegationUntil, setDelegationUntil] = useState<number | null>(null);
   const [delegationWallet, setDelegationWallet] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
+  const [sponsoringGas, setSponsoringGas] = useState(false);
 
   const { signMessage, isPending: signPending } = useSignMessage();
 
@@ -270,15 +271,22 @@ export function Dashboard() {
     }
 
     if (delegationActive) {
-      const mock = fakeTxHash();
-      toast.success(
-        `Agent executed swap on your behalf · ${mock.slice(0, 14)}…`,
-      );
-      setNextAction(null);
-      void refetchStrawBalance();
+      setSponsoringGas(true);
+      try {
+        await new Promise((r) => setTimeout(r, 800));
+        const mock = fakeTxHash();
+        toast.success(
+          `Agent executed swap on your behalf · ${mock.slice(0, 14)}…`,
+        );
+        setNextAction(null);
+        void refetchStrawBalance();
+      } finally {
+        setSponsoringGas(false);
+      }
       return;
     }
 
+    setSponsoringGas(true);
     try {
       const hash = await writeContractAsync({
         address: escrow,
@@ -291,6 +299,8 @@ export function Dashboard() {
       void refetchStrawBalance();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "Transaction failed");
+    } finally {
+      setSponsoringGas(false);
     }
   };
 
@@ -307,7 +317,8 @@ export function Dashboard() {
     Boolean(escrowAddr) &&
     nextAction?.kind === "acceptOffer" &&
     !writePending &&
-    !agentRunning;
+    !agentRunning &&
+    !sponsoringGas;
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#1c1410] text-amber-50">
@@ -476,10 +487,17 @@ export function Dashboard() {
               disabled={!isConnected || !canExecute}
               className="mt-3 self-start rounded border-2 border-amber-600 bg-amber-950/60 px-4 py-2.5 font-[family-name:var(--font-pixel)] text-[11px] text-amber-100 shadow-[2px_2px_0_#78350f] transition hover:bg-amber-900/45 disabled:cursor-not-allowed disabled:opacity-40"
             >
-              {delegationActive
-                ? "Execute AI Strategy (agent relay)"
-                : "Execute AI Strategy (wallet)"}
+              {sponsoringGas
+                ? "Sponsoring gas…"
+                : delegationActive
+                  ? "Execute AI Strategy (agent relay)"
+                  : "Execute AI Strategy (wallet)"}
             </button>
+            {sponsoringGas && (
+              <p className="mt-2 w-full text-xs leading-snug text-amber-300/90">
+                Agent is sponsoring gas via Paymaster…
+              </p>
+            )}
             {agentError && (
               <p className="mt-3 text-xs text-red-400/90">{agentError}</p>
             )}
