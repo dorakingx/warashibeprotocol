@@ -24,27 +24,55 @@ contract WarashibeEscrowTest is Test {
         uint256 makerId = straw.mintStarterStraw(alice);
         straw.approve(address(escrow), makerId);
 
-        uint256 offerId = escrow.createOffer(address(straw), makerId, address(apple), 99);
+        uint256 offerId =
+            escrow.createOffer(alice, address(straw), makerId, address(apple), 99, address(0));
         vm.stopPrank();
 
         assertEq(offerId, 1);
         assertEq(straw.ownerOf(makerId), address(escrow));
 
-        (uint256 id, address maker,, uint256 mId, address desiredAddr, uint256 desiredId, bool active) =
-            escrow.offers(offerId);
+        (
+            uint256 id,
+            address maker,
+            ,
+            uint256 mId,
+            ,
+            uint256 desiredId,
+            address agent,
+            bool active
+        ) = escrow.offers(offerId);
         assertEq(id, offerId);
         assertEq(maker, alice);
         assertEq(mId, makerId);
-        assertEq(desiredAddr, address(apple));
         assertEq(desiredId, 99);
+        assertEq(agent, address(0));
         assertTrue(active);
+    }
+
+    function test_createOffer_viaApprovedRelayer() public {
+        vm.prank(alice);
+        uint256 makerId = straw.mintStarterStraw(alice);
+        vm.prank(alice);
+        straw.approve(bob, makerId);
+
+        vm.prank(bob);
+        uint256 offerId =
+            escrow.createOffer(alice, address(straw), makerId, address(apple), 42, bob);
+
+        assertEq(offerId, 1);
+        assertEq(straw.ownerOf(makerId), address(escrow));
+
+        (, address maker,,,,, address agent,) = escrow.offers(offerId);
+        assertEq(maker, alice);
+        assertEq(agent, bob);
     }
 
     function test_acceptOffer() public {
         vm.startPrank(alice);
         uint256 strawId = straw.mintStarterStraw(alice);
         straw.approve(address(escrow), strawId);
-        uint256 offerId = escrow.createOffer(address(straw), strawId, address(apple), 1);
+        uint256 offerId =
+            escrow.createOffer(alice, address(straw), strawId, address(apple), 1, address(0));
         vm.stopPrank();
 
         vm.startPrank(bob);
@@ -57,7 +85,7 @@ contract WarashibeEscrowTest is Test {
         assertEq(straw.ownerOf(strawId), bob);
         assertEq(apple.ownerOf(appleId), alice);
 
-        (,,,,,, bool active) = escrow.offers(offerId);
+        (,,,,,,, bool active) = escrow.offers(offerId);
         assertFalse(active);
     }
 
@@ -65,14 +93,15 @@ contract WarashibeEscrowTest is Test {
         vm.startPrank(alice);
         uint256 strawId = straw.mintStarterStraw(alice);
         straw.approve(address(escrow), strawId);
-        uint256 offerId = escrow.createOffer(address(straw), strawId, address(apple), 1);
+        uint256 offerId =
+            escrow.createOffer(alice, address(straw), strawId, address(apple), 1, address(0));
 
         escrow.cancelOffer(offerId);
         vm.stopPrank();
 
         assertEq(straw.ownerOf(strawId), alice);
 
-        (,,,,,, bool active) = escrow.offers(offerId);
+        (,,,,,,, bool active) = escrow.offers(offerId);
         assertFalse(active);
     }
 
@@ -80,7 +109,8 @@ contract WarashibeEscrowTest is Test {
         vm.startPrank(alice);
         uint256 strawId = straw.mintStarterStraw(alice);
         straw.approve(address(escrow), strawId);
-        uint256 offerId = escrow.createOffer(address(straw), strawId, address(apple), 1);
+        uint256 offerId =
+            escrow.createOffer(alice, address(straw), strawId, address(apple), 1, address(0));
         vm.stopPrank();
 
         vm.prank(bob);
@@ -92,7 +122,8 @@ contract WarashibeEscrowTest is Test {
         vm.startPrank(alice);
         uint256 strawId = straw.mintStarterStraw(alice);
         straw.approve(address(escrow), strawId);
-        uint256 offerId = escrow.createOffer(address(straw), strawId, address(apple), 1);
+        uint256 offerId =
+            escrow.createOffer(alice, address(straw), strawId, address(apple), 1, address(0));
         escrow.cancelOffer(offerId);
         vm.stopPrank();
 
@@ -108,7 +139,8 @@ contract WarashibeEscrowTest is Test {
         vm.startPrank(alice);
         uint256 strawId = straw.mintStarterStraw(alice);
         straw.approve(address(escrow), strawId);
-        uint256 offerId = escrow.createOffer(address(straw), strawId, address(apple), 1);
+        uint256 offerId =
+            escrow.createOffer(alice, address(straw), strawId, address(apple), 1, address(0));
         vm.expectRevert(bytes("MAKER_CANNOT_ACCEPT"));
         escrow.acceptOffer(offerId);
         vm.stopPrank();

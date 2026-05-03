@@ -1,11 +1,17 @@
 import { NextResponse } from "next/server";
 import { encodeFunctionData } from "viem";
+import {
+  decodeOfferIdFromState,
+  escrowAddressFromEnv,
+} from "@/lib/escrow";
 
 /**
- * Env for WarashibeEscrow acceptOffer tx payload:
- * - NEXT_PUBLIC_ESCROW_ADDRESS — contract `to` (placeholder ok for demo JSON shape)
- * - NEXT_PUBLIC_MOCK_OFFER_ID — uint256 passed to acceptOffer (default 1)
- * - NEXT_PUBLIC_CHAIN_ID — numeric chain id (default 84532 Base Sepolia)
+ * Farcaster posts JSON with `untrustedData.state` echoing `fc:frame:state`.
+ * Fallback: FRAME_FALLBACK_OFFER_ID or NEXT_PUBLIC_MOCK_OFFER_ID (dev).
+ *
+ * Env:
+ * - ESCROW_ADDRESS / NEXT_PUBLIC_ESCROW_ADDRESS — transaction `to`
+ * - NEXT_PUBLIC_CHAIN_ID — defaults to 84532 (Base Sepolia)
  */
 
 const ACCEPT_OFFER_ABI = [
@@ -22,14 +28,29 @@ function caip2ChainId(numericChainId: number): string {
   return `eip155:${numericChainId}`;
 }
 
-export async function POST() {
-  const escrowAddress = (
-    process.env.NEXT_PUBLIC_ESCROW_ADDRESS ?? "0x0000000000000000000000000000000000000000"
-  ) as `0x${string}`;
+type FrameBody = {
+  untrustedData?: {
+    state?: string;
+    address?: string;
+  };
+};
 
-  const offerIdRaw = process.env.NEXT_PUBLIC_MOCK_OFFER_ID ?? "1";
-  const offerId = BigInt(offerIdRaw);
+export async function POST(request: Request) {
+  let body: FrameBody = {};
+  try {
+    body = (await request.json()) as FrameBody;
+  } catch {
+    /* empty body */
+  }
 
+  const fromState = decodeOfferIdFromState(body.untrustedData?.state);
+  const fallbackRaw =
+    process.env.FRAME_FALLBACK_OFFER_ID ??
+    process.env.NEXT_PUBLIC_MOCK_OFFER_ID ??
+    "1";
+  const offerId = fromState ?? BigInt(fallbackRaw);
+
+  const escrowAddress = escrowAddressFromEnv() ?? "0x0000000000000000000000000000000000000000";
   const chainIdNum = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 84532);
 
   const data = encodeFunctionData({
@@ -38,16 +59,16 @@ export async function POST() {
     args: [offerId],
   });
 
-  const body = {
+  const res = {
     chainId: caip2ChainId(chainIdNum),
     method: "eth_sendTransaction" as const,
     params: {
       abi: ACCEPT_OFFER_ABI,
-      to: escrowAddress,
+      to: escrowAddress as `0x${string}`,
       value: "0",
       data,
     },
   };
 
-  return NextResponse.json(body);
+  return NextResponse.json(res);
 }

@@ -7,6 +7,7 @@ interface IERC721Minimal {
 
 /// @title WarashibeEscrow
 /// @notice Trustless P2P NFT-for-NFT swaps: maker escrows their NFT; any holder of the desired NFT can accept.
+/// @dev `createOffer` pulls from `maker`; `msg.sender` must be authorized to move that NFT (EOA, smart account, or approved relayer).
 contract WarashibeEscrow {
     struct Offer {
         uint256 offerId;
@@ -15,6 +16,7 @@ contract WarashibeEscrow {
         uint256 makerTokenId;
         address desiredTokenAddress;
         uint256 desiredTokenId;
+        address agent;
         bool isActive;
     }
 
@@ -24,7 +26,8 @@ contract WarashibeEscrow {
     event OfferCreated(
         uint256 indexed offerId,
         address indexed maker,
-        address indexed makerTokenAddress,
+        address indexed agent,
+        address makerTokenAddress,
         uint256 makerTokenId,
         address desiredTokenAddress,
         uint256 desiredTokenId
@@ -33,28 +36,32 @@ contract WarashibeEscrow {
     event OfferCancelled(uint256 indexed offerId);
 
     function createOffer(
+        address maker,
         address makerTokenAddress,
         uint256 makerTokenId,
         address desiredTokenAddress,
-        uint256 desiredTokenId
+        uint256 desiredTokenId,
+        address agent
     ) external returns (uint256 offerId) {
+        require(maker != address(0), "ZERO_MAKER");
         require(makerTokenAddress != address(0) && desiredTokenAddress != address(0), "ZERO_COLLECTION");
 
         offerId = nextOfferId++;
-        IERC721Minimal(makerTokenAddress).transferFrom(msg.sender, address(this), makerTokenId);
+        IERC721Minimal(makerTokenAddress).transferFrom(maker, address(this), makerTokenId);
 
         offers[offerId] = Offer({
             offerId: offerId,
-            maker: msg.sender,
+            maker: maker,
             makerTokenAddress: makerTokenAddress,
             makerTokenId: makerTokenId,
             desiredTokenAddress: desiredTokenAddress,
             desiredTokenId: desiredTokenId,
+            agent: agent,
             isActive: true
         });
 
         emit OfferCreated(
-            offerId, msg.sender, makerTokenAddress, makerTokenId, desiredTokenAddress, desiredTokenId
+            offerId, maker, agent, makerTokenAddress, makerTokenId, desiredTokenAddress, desiredTokenId
         );
     }
 
