@@ -1,4 +1,20 @@
 .DS_Store
-**/out/
-**/cache/
-packages/contracts/broadcast/
+
+# Node / Next
+node_modules/
+.next/
+out/
+dist/
+coverage/
+*.log
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Foundry
+packages/contracts/lib/
+packages/contracts/cache/
+packages/contracts/out/
+broadcast/
