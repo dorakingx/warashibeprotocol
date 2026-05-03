@@ -6,12 +6,16 @@ import {
 } from "@/lib/escrow";
 
 /**
+ * Farcaster / Open Frames **EthSendTransactionAction** response.
+ * @see https://github.com/open-frames/standard — `chainId` (CAIP-2), `method: "eth_sendTransaction"`,
+ * `params.abi`, `params.to`, `params.data`, `params.value` (wei, decimal string).
+ *
  * Farcaster posts JSON with `untrustedData.state` echoing `fc:frame:state`.
  * Fallback: FRAME_FALLBACK_OFFER_ID or NEXT_PUBLIC_MOCK_OFFER_ID (dev).
  *
  * Env:
  * - ESCROW_ADDRESS / NEXT_PUBLIC_ESCROW_ADDRESS — transaction `to`
- * - NEXT_PUBLIC_CHAIN_ID — defaults to 84532 (Base Sepolia)
+ * - NEXT_PUBLIC_CHAIN_ID — defaults to 84532 (Base Sepolia); 11155111 = Ethereum Sepolia
  */
 
 const ACCEPT_OFFER_ABI = [
@@ -50,7 +54,14 @@ export async function POST(request: Request) {
     "1";
   const offerId = fromState ?? BigInt(fallbackRaw);
 
-  const escrowAddress = escrowAddressFromEnv() ?? "0x0000000000000000000000000000000000000000";
+  const escrowAddress = escrowAddressFromEnv();
+  if (!escrowAddress) {
+    return NextResponse.json(
+      { error: "escrow_not_configured", message: "Set NEXT_PUBLIC_ESCROW_ADDRESS" },
+      { status: 400 },
+    );
+  }
+
   const chainIdNum = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 84532);
 
   const data = encodeFunctionData({
@@ -64,7 +75,7 @@ export async function POST(request: Request) {
     method: "eth_sendTransaction" as const,
     params: {
       abi: ACCEPT_OFFER_ABI,
-      to: escrowAddress as `0x${string}`,
+      to: escrowAddress,
       value: "0",
       data,
     },

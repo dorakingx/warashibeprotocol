@@ -1,5 +1,5 @@
 import { createPublicClient, http, type Chain, type PublicClient } from "viem";
-import { base, baseSepolia } from "viem/chains";
+import { base, baseSepolia, hardhat, localhost, sepolia } from "viem/chains";
 
 /** Matches [`packages/contracts/src/WarashibeEscrow.sol`](../../packages/contracts/src/WarashibeEscrow.sol) */
 export const escrowAbi = [
@@ -63,6 +63,10 @@ export function rpcUrlFromEnv(): string | undefined {
 export function chainFromEnv(): Chain {
   const id = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 84532);
   if (id === 8453) return base;
+  if (id === 11155111) return sepolia;
+  if (id === 1337) return localhost;
+  if (id === 31_337) return hardhat;
+  if (id === 84532) return baseSepolia;
   return baseSepolia;
 }
 

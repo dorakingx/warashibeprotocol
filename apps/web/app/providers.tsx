@@ -5,7 +5,42 @@ import { type ReactNode, useState } from "react";
 import { Toaster } from "sonner";
 import { coinbaseWallet } from "@/lib/coinbaseWalletConnector";
 import { WagmiProvider, createConfig, http, injected } from "wagmi";
-import { base, baseSepolia } from "wagmi/chains";
+import {
+  base,
+  baseSepolia,
+  hardhat,
+  localhost,
+  sepolia,
+} from "wagmi/chains";
+
+const configuredChainId = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 84532);
+/** Chain 31337 is GoChain Testnet in public lists (symbol GO); MetaMask rejects ETH. Prefer 1337 (localhost, ETH). */
+const useLocal31337 = configuredChainId === 31_337;
+const useLocal1337 = configuredChainId === 1337;
+const useEthereumSepolia = configuredChainId === 11155111;
+const localRpc =
+  process.env.NEXT_PUBLIC_RPC_URL?.trim() || "http://127.0.0.1:8545";
+
+const publicRpc = process.env.NEXT_PUBLIC_RPC_URL?.trim();
+const sepoliaRpc =
+  useEthereumSepolia && publicRpc?.startsWith("http") ? publicRpc : undefined;
+
+const chains = useLocal1337
+  ? ([localhost, sepolia, baseSepolia, base] as const)
+  : useLocal31337
+    ? ([hardhat, sepolia, baseSepolia, base] as const)
+    : useEthereumSepolia
+      ? ([sepolia, baseSepolia, base] as const)
+      : ([baseSepolia, base] as const);
+
+// Wagmi infers chain IDs from the union of env-driven configs; include every ID so `transports` satisfies Record.
+const transports = {
+  [localhost.id]: http(useLocal1337 ? localRpc : "http://127.0.0.1:8545"),
+  [hardhat.id]: http(useLocal31337 ? localRpc : "http://127.0.0.1:8545"),
+  [sepolia.id]: sepoliaRpc ? http(sepoliaRpc) : http(),
+  [baseSepolia.id]: http(),
+  [base.id]: http(),
+};
 
 function makeQueryClient() {
   return new QueryClient({
@@ -16,7 +51,7 @@ function makeQueryClient() {
 }
 
 export const wagmiConfig = createConfig({
-  chains: [baseSepolia, base],
+  chains,
   connectors: [
     injected(),
     coinbaseWallet({
@@ -24,10 +59,7 @@ export const wagmiConfig = createConfig({
       preference: { options: "smartWalletOnly" },
     }),
   ],
-  transports: {
-    [baseSepolia.id]: http(),
-    [base.id]: http(),
-  },
+  transports,
   ssr: true,
 });
 

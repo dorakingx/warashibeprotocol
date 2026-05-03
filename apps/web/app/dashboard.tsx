@@ -2,12 +2,20 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
+import Confetti from "react-confetti";
+import {
+  ChainMismatchError,
+  UserRejectedRequestError,
+} from "viem";
 import {
   useAccount,
+  useChainId,
   useConnect,
   useDisconnect,
   useReadContract,
+  useReadContracts,
   useSignMessage,
+  useSwitchChain,
   useWaitForTransactionReceipt,
   useWatchContractEvent,
   useWriteContract,
@@ -15,6 +23,7 @@ import {
 
 import {
   erc721BalanceAbi,
+  erc721SymbolAbi,
   escrowEventsAbi,
   escrowWriteAbi,
 } from "@/lib/abis";
@@ -45,20 +54,91 @@ function getEscrowAddress(): `0x${string}` | undefined {
   return raw as `0x${string}`;
 }
 
+/** Fortune / goal NFTs for celebration (comma list or single address). */
+function parseFortuneTokenAddresses(): `0x${string}`[] {
+  const single = process.env.NEXT_PUBLIC_VICTORY_TOKEN_ADDRESS;
+  const multi = process.env.NEXT_PUBLIC_GOAL_CHECK_TOKEN_ADDRESSES;
+  const acc = new Set<string>();
+  const push = (s: string | undefined) => {
+    const t = s?.trim();
+    if (t && /^0x[a-fA-F0-9]{40}$/i.test(t)) acc.add(t.toLowerCase());
+  };
+  push(single);
+  if (multi) {
+    for (const p of multi.split(",")) push(p);
+  }
+  return [...acc].map((a) => a as `0x${string}`);
+}
+
+function normalizeGoalCompare(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+}
+
+function matchesGoalToSymbol(goalRaw: string, symbolRaw: string): boolean {
+  const g = normalizeGoalCompare(goalRaw);
+  const sym = normalizeGoalCompare(symbolRaw);
+  if (!g || !sym) return false;
+  if (g.includes(sym) || sym.includes(g)) return true;
+  const first = g.split(/\s+/).filter(Boolean)[0];
+  return Boolean(first && sym.includes(first));
+}
+
 export type NextActionPayload = {
   kind: "acceptOffer";
   targetContract: `0x${string}`;
   offerIdToAccept: string;
+  /** Server-encoded acceptOffer calldata for wallets / smart accounts. */
+  calldata?: `0x${string}`;
   tokenToOffer?: { address: string; tokenId: string };
 };
 
+function formatWalletTxError(e: unknown): string {
+  if (e instanceof UserRejectedRequestError) {
+    return "The wallet rejected the request. In MetaMask tap Confirm, or approve the add-network / switch-network prompt (dismissing it shows this same error).";
+  }
+  if (e instanceof ChainMismatchError) {
+    const expected = Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 84532);
+    return `Your wallet chain does not match this transaction (expected chain ID ${expected}). Switch MetaMask to that network, or press Mint again and approve the switch.`;
+  }
+  if (
+    typeof e === "object" &&
+    e !== null &&
+    "code" in e &&
+    (e as { code?: number }).code === 4001
+  ) {
+    return "The wallet rejected the request (code 4001). Approve the signature or network switch.";
+  }
+  return e instanceof Error ? e.message : "Transaction failed";
+}
+
 export function Dashboard() {
-  const { address, isConnected } = useAccount();
+  const { address, isConnected, connector } = useAccount();
   const { connect, connectors, isPending: connectPending } = useConnect();
   const { disconnect } = useDisconnect();
+  const walletChainId = useChainId();
+  const { switchChainAsync } = useSwitchChain();
+
+  const expectedChainId = useMemo(
+    () => Number(process.env.NEXT_PUBLIC_CHAIN_ID ?? 84532),
+    [],
+  );
 
   const strawAddr = useMemo(() => getStrawAddress(), []);
   const escrowAddr = useMemo(() => getEscrowAddress(), []);
+
+  const chainMismatch =
+    isConnected && walletChainId !== expectedChainId;
+
+  /** Always sync the wallet chain via the connector. Relying on `useChainId` alone can skip switching when wagmi state defaults to the first configured local chain while MetaMask is still on mainnet. */
+  const syncWalletToExpectedChain = useCallback(async () => {
+    if (!connector) {
+      throw new Error("Connect your wallet first.");
+    }
+    await switchChainAsync({
+      chainId: expectedChainId,
+      connector,
+    });
+  }, [connector, expectedChainId, switchChainAsync]);
 
   const lastToastTxHash = useRef<string | undefined>(undefined);
 
@@ -66,6 +146,8 @@ export function Dashboard() {
   const [delegationWallet, setDelegationWallet] = useState<string | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [sponsoringGas, setSponsoringGas] = useState(false);
+  const [winSize, setWinSize] = useState({ width: 0, height: 0 });
+  const [victoryDismissed, setVictoryDismissed] = useState(false);
 
   const { signMessage, isPending: signPending } = useSignMessage();
 
@@ -92,6 +174,43 @@ export function Dashboard() {
       enabled: Boolean(strawAddr && address),
     },
   });
+
+  const fortuneAddrList = useMemo(() => parseFortuneTokenAddresses(), []);
+
+  const fortuneReads = useMemo(() => {
+    if (!address || fortuneAddrList.length === 0) return [];
+    return fortuneAddrList.flatMap((token) => [
+      {
+        address: token,
+        abi: erc721BalanceAbi,
+        functionName: "balanceOf" as const,
+        args: [address],
+      },
+      {
+        address: token,
+        abi: erc721SymbolAbi,
+        functionName: "symbol" as const,
+      },
+    ]);
+  }, [address, fortuneAddrList]);
+
+  const { data: fortuneData } = useReadContracts({
+    contracts: fortuneReads,
+    query: {
+      enabled: fortuneReads.length > 0 && Boolean(address),
+    },
+  });
+
+  useEffect(() => {
+    const fn = () =>
+      setWinSize({
+        width: window.innerWidth,
+        height: window.innerHeight,
+      });
+    fn();
+    window.addEventListener("resize", fn);
+    return () => window.removeEventListener("resize", fn);
+  }, []);
 
   useWatchContractEvent({
     address: escrowAddr,
@@ -188,6 +307,27 @@ export function Dashboard() {
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
 
+  useEffect(() => {
+    setVictoryDismissed(false);
+  }, [goal]);
+
+  const goalReached = useMemo(() => {
+    if (!goal.trim() || !fortuneData || fortuneAddrList.length === 0) return false;
+    for (let i = 0; i < fortuneAddrList.length; i++) {
+      const balRaw = fortuneData[i * 2]?.result;
+      const symRaw = fortuneData[i * 2 + 1]?.result;
+      let bal: bigint;
+      if (typeof balRaw === "bigint") bal = balRaw;
+      else if (typeof balRaw === "number") bal = BigInt(balRaw);
+      else bal = BigInt(0);
+      const sym = typeof symRaw === "string" ? symRaw : "";
+      if (bal > BigInt(0) && sym && matchesGoalToSymbol(goal, sym)) return true;
+    }
+    return false;
+  }, [goal, fortuneData, fortuneAddrList]);
+
+  const showVictoryOverlay = goalReached && !victoryDismissed;
+
   const runAgent = useCallback(async () => {
     setAgentError(null);
     setThoughtLines([]);
@@ -228,12 +368,20 @@ export function Dashboard() {
   }, [goal]);
 
   const onMint = async () => {
-    if (!address || !strawAddr) return;
+    if (!address) return;
+    if (!strawAddr) {
+      toast.error(
+        "Set NEXT_PUBLIC_STRAW_NFT_ADDRESS in .env.local to your deployed StrawNFT address for this chain, then restart next dev.",
+      );
+      return;
+    }
     setMintError(null);
     resetWrite();
     setMintHash(undefined);
     try {
+      await syncWalletToExpectedChain();
       const hash = await writeContractAsync({
+        chainId: expectedChainId,
         address: strawAddr,
         abi: STRAW_ABI,
         functionName: "mintStarterStraw",
@@ -242,7 +390,7 @@ export function Dashboard() {
       setMintHash(hash);
       toast.message("Mint submitted — confirm if prompted.");
     } catch (e) {
-      const msg = e instanceof Error ? e.message : "Mint failed";
+      const msg = formatWalletTxError(e);
       setMintError(msg);
       toast.error(msg);
     }
@@ -288,7 +436,9 @@ export function Dashboard() {
 
     setSponsoringGas(true);
     try {
+      await syncWalletToExpectedChain();
       const hash = await writeContractAsync({
+        chainId: expectedChainId,
         address: escrow,
         abi: escrowWriteAbi,
         functionName: "acceptOffer",
@@ -298,7 +448,7 @@ export function Dashboard() {
       setNextAction(null);
       void refetchStrawBalance();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "Transaction failed");
+      toast.error(formatWalletTxError(e));
     } finally {
       setSponsoringGas(false);
     }
@@ -322,6 +472,47 @@ export function Dashboard() {
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#1c1410] text-amber-50">
+      {showVictoryOverlay && winSize.width > 0 && (
+        <div className="pointer-events-none fixed inset-0 z-[100]">
+          <Confetti
+            width={winSize.width}
+            height={winSize.height}
+            numberOfPieces={320}
+            recycle={false}
+            gravity={0.22}
+            colors={["#fbbf24", "#fde68a", "#fcd34d", "#a8a29e", "#fef3c7"]}
+          />
+        </div>
+      )}
+      {showVictoryOverlay && (
+        <div
+          className="fixed inset-0 z-[101] flex items-center justify-center bg-black/55 px-5 py-10 backdrop-blur-[2px]"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="victory-title"
+        >
+          <div className="pointer-events-auto max-w-lg rounded-2xl border-4 border-amber-500 bg-[#120d0a] p-8 text-center shadow-[10px_10px_0_#78350f]">
+            <p
+              id="victory-title"
+              className="font-[family-name:var(--font-pixel)] text-lg leading-snug text-amber-50 sm:text-xl"
+            >
+              Agent successfully achieved your intent! The Straw has become a
+              fortune!
+            </p>
+            <p className="mt-5 text-sm leading-relaxed text-amber-200/85">
+              Your wallet holds the NFT you named in your goal — the agent&apos;s
+              route aligned with on-chain reality.
+            </p>
+            <button
+              type="button"
+              onClick={() => setVictoryDismissed(true)}
+              className="mt-8 rounded border-2 border-amber-600 bg-amber-950/70 px-6 py-2.5 font-[family-name:var(--font-pixel)] text-[11px] text-amber-100 shadow-[3px_3px_0_#78350f] transition hover:bg-amber-900/50"
+            >
+              Continue
+            </button>
+          </div>
+        </div>
+      )}
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.07]"
         style={{
@@ -423,12 +614,69 @@ export function Dashboard() {
               </code>{" "}
               after deploy.
             </p>
+            {chainMismatch && (
+              <p className="mt-3 rounded border border-amber-700/50 bg-amber-950/35 px-3 py-2 text-xs leading-relaxed text-amber-200/90">
+                Your wallet is on chain {walletChainId}, but this app expects{" "}
+                {expectedChainId}. Press Mint to trigger a network switch in your
+                wallet.
+                {expectedChainId === 11155111 && (
+                  <>
+                    {" "}
+                    Use Ethereum Sepolia in MetaMask. Fund the deployer with
+                    Sepolia ETH, run{" "}
+                    <code className="font-mono text-[10px]">
+                      forge script script/Deploy.s.sol:DeployScript --rpc-url
+                      … --broadcast
+                    </code>{" "}
+                    from{" "}
+                    <code className="font-mono text-[10px]">
+                      packages/contracts
+                    </code>
+                    , then set{" "}
+                    <code className="font-mono text-[10px]">
+                      NEXT_PUBLIC_STRAW_NFT_ADDRESS
+                    </code>{" "}
+                    and{" "}
+                    <code className="font-mono text-[10px]">
+                      NEXT_PUBLIC_ESCROW_ADDRESS
+                    </code>
+                    .
+                  </>
+                )}
+                {(expectedChainId === 1337 || expectedChainId === 31337) && (
+                  <>
+                    {" "}
+                    Local dev: prefer chain ID 1337 (native ETH) with{" "}
+                    <code className="font-mono text-[10px]">
+                      anvil --chain-id 1337
+                    </code>
+                    . Chain 31337 is listed as GoChain Testnet (GO) on public
+                    lists, so MetaMask may warn if you label it ETH. RPC{" "}
+                    <code className="font-mono text-[10px]">
+                      http://127.0.0.1:8545
+                    </code>{" "}
+                    must be reachable.
+                  </>
+                )}
+              </p>
+            )}
+            {!strawAddr && isConnected && (
+              <p className="mt-3 text-xs leading-relaxed text-amber-500/95">
+                Straw contract address is missing from env. Deploy StrawNFT on
+                chain {expectedChainId}, add{" "}
+                <code className="rounded bg-black/30 px-1 font-mono text-[10px]">
+                  NEXT_PUBLIC_STRAW_NFT_ADDRESS
+                </code>{" "}
+                to <code className="font-mono text-[10px]">.env.local</code>, and
+                restart the app. You can still press the button below for a
+                reminder.
+              </p>
+            )}
             <button
               type="button"
               onClick={() => void onMint()}
               disabled={
                 !isConnected ||
-                !strawAddr ||
                 writePending ||
                 mintConfirming ||
                 !address
@@ -436,7 +684,7 @@ export function Dashboard() {
               className="mt-6 self-start rounded border-2 border-emerald-800 bg-emerald-950/50 px-4 py-2.5 font-[family-name:var(--font-pixel)] text-[11px] text-emerald-100 shadow-[2px_2px_0_#14532d] transition hover:bg-emerald-900/40 disabled:cursor-not-allowed disabled:opacity-40"
             >
               {!strawAddr
-                ? "Set STRAW contract env"
+                ? "Mint Straw NFT — configure env first"
                 : writePending || mintConfirming
                   ? "Minting…"
                   : mintConfirmed
@@ -505,6 +753,12 @@ export function Dashboard() {
               <p className="mt-2 font-mono text-[10px] text-amber-600/90">
                 Next: acceptOffer #{nextAction.offerIdToAccept} →{" "}
                 {nextAction.targetContract.slice(0, 10)}…
+                {nextAction.calldata ? (
+                  <>
+                    {" "}
+                    · calldata {nextAction.calldata.slice(0, 12)}…
+                  </>
+                ) : null}
               </p>
             )}
             <div className="mt-5 min-h-[160px] flex-1 overflow-y-auto rounded border border-amber-950/80 bg-black/50 p-3 font-mono text-[11px] leading-relaxed text-emerald-400/95 shadow-inner">

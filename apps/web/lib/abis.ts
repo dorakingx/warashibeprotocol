@@ -31,3 +31,13 @@ export const erc721BalanceAbi = [
     outputs: [{ type: "uint256", name: "" }],
   },
 ] as const;
+
+export const erc721SymbolAbi = [
+  {
+    type: "function",
+    name: "symbol",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ type: "string", name: "" }],
+  },
+] as const;
