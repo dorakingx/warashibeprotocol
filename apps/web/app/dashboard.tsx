@@ -1,13 +1,23 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import {
   useAccount,
   useConnect,
   useDisconnect,
+  useReadContract,
+  useSignMessage,
   useWaitForTransactionReceipt,
+  useWatchContractEvent,
   useWriteContract,
 } from "wagmi";
+
+import {
+  erc721BalanceAbi,
+  escrowEventsAbi,
+  escrowWriteAbi,
+} from "@/lib/abis";
 
 const STRAW_ABI = [
   {
@@ -19,11 +29,28 @@ const STRAW_ABI = [
   },
 ] as const;
 
+const DELEGATION_MESSAGE =
+  "Allow Agent to trade your assets on WarashibeEscrow for the next 24 hours.";
+const DELEGATION_STORAGE_KEY = "warashibe_agent_delegation";
+
 function getStrawAddress(): `0x${string}` | undefined {
   const raw = process.env.NEXT_PUBLIC_STRAW_NFT_ADDRESS;
   if (!raw || raw === "0x0000000000000000000000000000000000000000") return undefined;
   return raw as `0x${string}`;
 }
+
+function getEscrowAddress(): `0x${string}` | undefined {
+  const raw = process.env.NEXT_PUBLIC_ESCROW_ADDRESS ?? "";
+  if (!raw || !/^0x[a-fA-F0-9]{40}$/i.test(raw)) return undefined;
+  return raw as `0x${string}`;
+}
+
+export type NextActionPayload = {
+  kind: "acceptOffer";
+  targetContract: `0x${string}`;
+  offerIdToAccept: string;
+  tokenToOffer?: { address: string; tokenId: string };
+};
 
 export function Dashboard() {
   const { address, isConnected } = useAccount();
@@ -31,28 +58,139 @@ export function Dashboard() {
   const { disconnect } = useDisconnect();
 
   const strawAddr = useMemo(() => getStrawAddress(), []);
+  const escrowAddr = useMemo(() => getEscrowAddress(), []);
+
+  const lastToastTxHash = useRef<string | undefined>(undefined);
+
+  const [delegationUntil, setDelegationUntil] = useState<number | null>(null);
+  const [delegationWallet, setDelegationWallet] = useState<string | null>(null);
+  const [nowTick, setNowTick] = useState(() => Date.now());
+
+  const { signMessage, isPending: signPending } = useSignMessage();
 
   const {
-    data: mintHash,
-    writeContract,
-    isPending: mintPending,
-    error: mintError,
-    reset: resetMint,
+    writeContractAsync,
+    isPending: writePending,
+    reset: resetWrite,
   } = useWriteContract();
+
+  const [mintHash, setMintHash] = useState<`0x${string}` | undefined>();
+  const [mintError, setMintError] = useState<string | null>(null);
 
   const { isLoading: mintConfirming, isSuccess: mintConfirmed } =
     useWaitForTransactionReceipt({
       hash: mintHash,
     });
 
+  const { data: strawBalance, refetch: refetchStrawBalance } = useReadContract({
+    address: strawAddr,
+    abi: erc721BalanceAbi,
+    functionName: "balanceOf",
+    args: address ? [address] : undefined,
+    query: {
+      enabled: Boolean(strawAddr && address),
+    },
+  });
+
+  useWatchContractEvent({
+    address: escrowAddr,
+    abi: escrowEventsAbi,
+    eventName: "OfferAccepted",
+    enabled: Boolean(escrowAddr && address && isConnected),
+    onLogs(logs) {
+      if (!address) return;
+      for (const log of logs) {
+        const txHash = log.transactionHash;
+        if (txHash && txHash === lastToastTxHash.current) continue;
+        const args = log.args as
+          | {
+              offerId?: bigint;
+              taker?: `0x${string}`;
+              maker?: `0x${string}`;
+            }
+          | undefined;
+        if (!args?.taker || !args?.maker) continue;
+        const me = address.toLowerCase();
+        if (args.taker.toLowerCase() !== me && args.maker.toLowerCase() !== me) {
+          continue;
+        }
+        if (txHash) lastToastTxHash.current = txHash;
+        toast.success(
+          args.taker.toLowerCase() === me
+            ? "Swap successful! You traded up as taker."
+            : "Swap successful! Your offer was filled — you traded up!",
+        );
+        void refetchStrawBalance();
+      }
+    },
+  });
+
+  useEffect(() => {
+    if (!address || typeof window === "undefined") return;
+    try {
+      const raw = sessionStorage.getItem(DELEGATION_STORAGE_KEY);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as { until?: number; wallet?: string };
+      if (
+        typeof parsed.until === "number" &&
+        parsed.wallet?.toLowerCase() === address.toLowerCase()
+      ) {
+        setDelegationUntil(parsed.until);
+        setDelegationWallet(parsed.wallet);
+      }
+    } catch {
+      /* ignore */
+    }
+  }, [address]);
+
+  useEffect(() => {
+    if (!delegationUntil || Date.now() >= delegationUntil) return;
+    const t = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [delegationUntil]);
+
+  const delegationActive = Boolean(
+    address &&
+      delegationWallet &&
+      delegationWallet.toLowerCase() === address.toLowerCase() &&
+      delegationUntil &&
+      nowTick < delegationUntil,
+  );
+
+  const delegationRemainingMs =
+    delegationUntil && nowTick < delegationUntil
+      ? delegationUntil - nowTick
+      : 0;
+
+  const grantDelegation = () => {
+    if (!address) return;
+    signMessage(
+      { message: DELEGATION_MESSAGE },
+      {
+        onSuccess() {
+          const until = Date.now() + 24 * 60 * 60 * 1000;
+          sessionStorage.setItem(
+            DELEGATION_STORAGE_KEY,
+            JSON.stringify({ until, wallet: address }),
+          );
+          setDelegationUntil(until);
+          setDelegationWallet(address);
+          toast.success("Session key granted — Agent is fully autonomous.");
+        },
+      },
+    );
+  };
+
   const [goal, setGoal] = useState("");
-  const [agentLogs, setAgentLogs] = useState<string[]>([]);
+  const [thoughtLines, setThoughtLines] = useState<string[]>([]);
+  const [nextAction, setNextAction] = useState<NextActionPayload | null>(null);
   const [agentRunning, setAgentRunning] = useState(false);
   const [agentError, setAgentError] = useState<string | null>(null);
 
   const runAgent = useCallback(async () => {
     setAgentError(null);
-    setAgentLogs([]);
+    setThoughtLines([]);
+    setNextAction(null);
     const trimmed = goal.trim();
     if (!trimmed) {
       setAgentError("Describe your target asset first.");
@@ -69,11 +207,17 @@ export function Dashboard() {
         const err = (await res.json().catch(() => ({}))) as { error?: string };
         throw new Error(err.error ?? `Request failed (${res.status})`);
       }
-      const data = (await res.json()) as { logs: string[] };
-      const logs = data.logs ?? [];
-      for (const line of logs) {
+      const data = (await res.json()) as {
+        thoughtProcess?: string[];
+        nextAction?: NextActionPayload;
+      };
+      const lines = data.thoughtProcess ?? [];
+      for (const line of lines) {
         await new Promise((r) => setTimeout(r, 680));
-        setAgentLogs((prev) => [...prev, line]);
+        setThoughtLines((prev) => [...prev, line]);
+      }
+      if (data.nextAction?.kind === "acceptOffer") {
+        setNextAction(data.nextAction);
       }
     } catch (e) {
       setAgentError(e instanceof Error ? e.message : "Agent request failed");
@@ -82,18 +226,88 @@ export function Dashboard() {
     }
   }, [goal]);
 
-  const onMint = () => {
+  const onMint = async () => {
     if (!address || !strawAddr) return;
-    resetMint();
-    writeContract({
-      address: strawAddr,
-      abi: STRAW_ABI,
-      functionName: "mintStarterStraw",
-      args: [address],
-    });
+    setMintError(null);
+    resetWrite();
+    setMintHash(undefined);
+    try {
+      const hash = await writeContractAsync({
+        address: strawAddr,
+        abi: STRAW_ABI,
+        functionName: "mintStarterStraw",
+        args: [address],
+      });
+      setMintHash(hash);
+      toast.message("Mint submitted — confirm if prompted.");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Mint failed";
+      setMintError(msg);
+      toast.error(msg);
+    }
+  };
+
+  const fakeTxHash = () => {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return `0x${Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")}`;
+  };
+
+  const onExecuteStrategy = async () => {
+    if (!nextAction || nextAction.kind !== "acceptOffer") return;
+    const escrow = getEscrowAddress();
+    if (!escrow) {
+      toast.error("Set NEXT_PUBLIC_ESCROW_ADDRESS to execute.");
+      return;
+    }
+    if (
+      nextAction.targetContract.toLowerCase() !== escrow.toLowerCase()
+    ) {
+      toast.error("Escrow mismatch — run Delegate to AI again.");
+      return;
+    }
+
+    if (delegationActive) {
+      const mock = fakeTxHash();
+      toast.success(
+        `Agent executed swap on your behalf · ${mock.slice(0, 14)}…`,
+      );
+      setNextAction(null);
+      void refetchStrawBalance();
+      return;
+    }
+
+    try {
+      const hash = await writeContractAsync({
+        address: escrow,
+        abi: escrowWriteAbi,
+        functionName: "acceptOffer",
+        args: [BigInt(nextAction.offerIdToAccept)],
+      });
+      toast.success(`Tx sent · ${hash.slice(0, 12)}… — confirm in wallet.`);
+      setNextAction(null);
+      void refetchStrawBalance();
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Transaction failed");
+    }
+  };
+
+  const fmtRemaining = () => {
+    const ms = delegationRemainingMs;
+    const h = Math.floor(ms / 3600000);
+    const m = Math.floor((ms % 3600000) / 60000);
+    const s = Math.floor((ms % 60000) / 1000);
+    return `${h}h ${m}m ${s}s`;
   };
 
   const primaryConnector = connectors[0];
+  const canExecute =
+    Boolean(escrowAddr) &&
+    nextAction?.kind === "acceptOffer" &&
+    !writePending &&
+    !agentRunning;
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#1c1410] text-amber-50">
@@ -135,6 +349,11 @@ export function Dashboard() {
               <span className="font-mono text-xs text-amber-300/90">
                 {address?.slice(0, 6)}…{address?.slice(-4)}
               </span>
+              {delegationActive && (
+                <span className="rounded border border-emerald-700/60 bg-emerald-950/40 px-2 py-1 font-[family-name:var(--font-pixel)] text-[10px] text-emerald-300">
+                  Agent is fully autonomous
+                </span>
+              )}
               <button
                 type="button"
                 onClick={() => disconnect()}
@@ -146,11 +365,46 @@ export function Dashboard() {
           )}
         </section>
 
+        <section className="mt-6 rounded-lg border-2 border-violet-900/50 bg-[#0f0b08]/90 p-5 shadow-[4px_4px_0_#3b0764]">
+          <h2 className="font-[family-name:var(--font-pixel)] text-sm text-violet-200">
+            Grant AI Session Key
+          </h2>
+          <p className="mt-2 text-sm leading-relaxed text-amber-200/75">
+            ERC-4337 narrative: sign once so the agent can route swaps without a
+            popup storm (demo uses session mock after grant).
+          </p>
+          <p className="mt-2 font-mono text-[10px] leading-snug text-amber-500/90">
+            “{DELEGATION_MESSAGE}”
+          </p>
+          <div className="mt-4 flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={() => grantDelegation()}
+              disabled={!isConnected || !address || signPending}
+              className="rounded border-2 border-violet-700 bg-violet-950/50 px-4 py-2 font-[family-name:var(--font-pixel)] text-[11px] text-violet-100 shadow-[2px_2px_0_#4c1d95] transition hover:bg-violet-900/40 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {signPending ? "Sign in wallet…" : "Grant AI Session Key"}
+            </button>
+            {delegationActive && (
+              <span className="text-xs text-emerald-400/95">
+                Session expires in {fmtRemaining()}
+              </span>
+            )}
+          </div>
+        </section>
+
         <main className="mt-10 grid flex-1 gap-8 lg:grid-cols-2">
           <article className="flex flex-col rounded-lg border-2 border-amber-900/55 bg-[#0f0b08]/85 p-6 shadow-[4px_4px_0_#292524]">
             <h2 className="font-[family-name:var(--font-pixel)] text-sm text-amber-200">
               Mint Straw NFT
             </h2>
+            {strawAddr && address && (
+              <p className="mt-3 font-mono text-xs text-cyan-400/90">
+                Straw balance:{" "}
+                {strawBalance !== undefined ? String(strawBalance) : "…"} · live
+                updates on swaps
+              </p>
+            )}
             <p className="mt-3 text-sm leading-relaxed text-amber-200/75">
               Claim your starter Straw — the folktale begins here. Requires{" "}
               <code className="rounded bg-black/30 px-1 font-mono text-[11px]">
@@ -160,11 +414,11 @@ export function Dashboard() {
             </p>
             <button
               type="button"
-              onClick={onMint}
+              onClick={() => void onMint()}
               disabled={
                 !isConnected ||
                 !strawAddr ||
-                mintPending ||
+                writePending ||
                 mintConfirming ||
                 !address
               }
@@ -172,7 +426,7 @@ export function Dashboard() {
             >
               {!strawAddr
                 ? "Set STRAW contract env"
-                : mintPending || mintConfirming
+                : writePending || mintConfirming
                   ? "Minting…"
                   : mintConfirmed
                     ? "Mint again"
@@ -185,7 +439,7 @@ export function Dashboard() {
               </p>
             )}
             {mintError && (
-              <p className="mt-2 text-xs text-red-400/90">{mintError.message}</p>
+              <p className="mt-2 text-xs text-red-400/90">{mintError}</p>
             )}
           </article>
 
@@ -194,8 +448,8 @@ export function Dashboard() {
               Delegate to AI Agent
             </h2>
             <p className="mt-3 text-sm leading-relaxed text-amber-200/75">
-              Name your dream asset — the agent simulates pathfinding and Frame
-              payloads for each hop.
+              Name your dream asset — the agent plans hops and returns an on-chain
+              nextAction for acceptOffer.
             </p>
             <label className="mt-4 block text-xs font-medium text-amber-400/90">
               Target asset
@@ -216,24 +470,40 @@ export function Dashboard() {
             >
               {agentRunning ? "Agent thinking…" : "Delegate to AI"}
             </button>
+            <button
+              type="button"
+              onClick={() => void onExecuteStrategy()}
+              disabled={!isConnected || !canExecute}
+              className="mt-3 self-start rounded border-2 border-amber-600 bg-amber-950/60 px-4 py-2.5 font-[family-name:var(--font-pixel)] text-[11px] text-amber-100 shadow-[2px_2px_0_#78350f] transition hover:bg-amber-900/45 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {delegationActive
+                ? "Execute AI Strategy (agent relay)"
+                : "Execute AI Strategy (wallet)"}
+            </button>
             {agentError && (
               <p className="mt-3 text-xs text-red-400/90">{agentError}</p>
             )}
+            {nextAction && (
+              <p className="mt-2 font-mono text-[10px] text-amber-600/90">
+                Next: acceptOffer #{nextAction.offerIdToAccept} →{" "}
+                {nextAction.targetContract.slice(0, 10)}…
+              </p>
+            )}
             <div className="mt-5 min-h-[160px] flex-1 overflow-y-auto rounded border border-amber-950/80 bg-black/50 p-3 font-mono text-[11px] leading-relaxed text-emerald-400/95 shadow-inner">
-              {agentLogs.length === 0 && !agentRunning && (
+              {thoughtLines.length === 0 && !agentRunning && (
                 <span className="text-amber-700/80">
                   {isConnected
                     ? "> Awaiting your goal…"
                     : "> Connect wallet to delegate."}
                 </span>
               )}
-              {agentLogs.map((line, i) => (
+              {thoughtLines.map((line, i) => (
                 <div key={`${i}-${line.slice(0, 12)}`} className="py-0.5">
                   <span className="text-amber-600/90">{"> "}</span>
                   {line}
                 </div>
               ))}
-              {agentRunning && agentLogs.length === 0 && (
+              {agentRunning && thoughtLines.length === 0 && (
                 <span className="animate-pulse text-amber-500/80">
                   {" > …"}
                 </span>
